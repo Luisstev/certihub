@@ -1,5 +1,6 @@
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from config import settings
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 
 app = FastAPI(
@@ -8,18 +9,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Configuración del cliente S3 para MinIO local
-S3_ENDPOINT = "http://127.0.0.1:9000"
-AWS_ACCESS_KEY_ID = "admin"
-AWS_SECRET_ACCESS_KEY = "password123"
-BUCKET_NAME = "certificados"
-
-# Inicializar cliente de S3 con boto3
+# Inicializar cliente de S3 leyendo las variables desde settings
 s3_client = boto3.client(
     "s3",
-    endpoint_url=S3_ENDPOINT,
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    endpoint_url=settings.s3_endpoint,
+    aws_access_key_id=settings.aws_access_key_id,
+    aws_secret_access_key=settings.aws_secret_access_key,
 )
 
 
@@ -30,7 +25,6 @@ def read_root():
 
 @app.post("/upload-certificate/", status_code=status.HTTP_201_CREATED)
 async def upload_certificate(file: UploadFile = File(...)):
-  # Validar que el archivo sea un PDF
   if not file.filename.lower().endswith(".pdf"):
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -38,17 +32,16 @@ async def upload_certificate(file: UploadFile = File(...)):
     )
 
   try:
-    # Subir el archivo directamente desde la memoria al bucket de MinIO
     s3_client.upload_fileobj(
         file.file,
-        BUCKET_NAME,
+        settings.bucket_name,
         file.filename,
         ExtraArgs={"ContentType": "application/pdf"},
     )
     return {
         "mensaje": "Certificado subido con éxito a la infraestructura S3",
         "filename": file.filename,
-        "bucket": BUCKET_NAME,
+        "bucket": settings.bucket_name,
     }
   except (BotoCoreError, ClientError) as e:
     raise HTTPException(
