@@ -6,6 +6,7 @@ class Settings(BaseSettings):
   aws_access_key_id: str
   aws_secret_access_key: str
   bucket_name: str
+  database_url: str
 
   model_config = SettingsConfigDict(
       env_file=".env", env_file_encoding="utf-8", extra="ignore"
