@@ -133,3 +133,45 @@ def get_certificate_download_url(
       "filename": cert.filename,
       "download_url": presigned_url,
   }
+
+@app.delete("/certificates/{certificate_id}", status_code=status.HTTP_200_OK)
+def delete_certificate(certificate_id: int, db: Session = Depends(get_db)):
+  """Elimina de forma coordinada el archivo en MinIO y su registro en SQL Server."""
+  # 1. Buscar los metadatos del certificado en SQL Server
+  cert = (
+      db.query(CertificateModel)
+      .filter(CertificateModel.id == certificate_id)
+      .first()
+  )
+  if not cert:
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="El certificado solicitado no existe.",
+    )
+
+  # 2. Eliminar el archivo físico almacenado en el bucket de MinIO
+  try:
+    s3_client.delete_object(Bucket=settings.bucket_name, Key=cert.s3_key)
+  except (BotoCoreError, ClientError) as e:
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"Error al eliminar el archivo físico en MinIO: {str(e)}",
+    )
+
+  # 3. Eliminar el registro correspondiente en SQL Server
+  try:
+    db.delete(cert)
+    db.commit()
+  except Exception as e:
+    db.rollback()
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"Error al eliminar el registro en la base de datos: {str(e)}",
+    )
+
+  return {
+      "mensaje": (
+          f"Certificado con ID {certificate_id} eliminado exitosamente de MinIO"
+          " y SQL Server."
+      )
+  }
