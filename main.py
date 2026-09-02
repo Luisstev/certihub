@@ -17,7 +17,7 @@ from database import Base, engine, get_db
 from models import CertificateModel
 from schemas import CertificateResponse
 
-# Crear las tablas en SQL Server si no existen
+# Inicializar tablas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
@@ -32,6 +32,9 @@ s3_client = boto3.client(
     aws_access_key_id=settings.aws_access_key_id,
     aws_secret_access_key=settings.aws_secret_access_key,
 )
+
+MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 
 @app.get("/")
@@ -50,16 +53,29 @@ async def upload_certificate(
     file: UploadFile = File(..., description="Archivo PDF del certificado"),
     db: Session = Depends(get_db),
 ):
+  # 1. Validación de extensión de archivo
   if not file.filename.lower().endswith(".pdf"):
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="Formato no permitido. Únicamente se aceptan archivos PDF.",
     )
 
-  # Generar una clave única para el almacenamiento en S3
+  # 2. Validación de tamaño máximo del archivo
+  file.file.seek(0, 2)
+  file_size = file.file.tell()
+  file.file.seek(0)
+
+  if file_size > MAX_FILE_SIZE_BYTES:
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"El archivo excede el tamaño máximo permitido de {MAX_FILE_SIZE_MB} MB.",
+    )
+
+  # 3. Generar clave única para almacenamiento S3
   file_extension = file.filename.split(".")[-1]
   unique_s3_key = f"{uuid.uuid4()}.{file_extension}"
 
+  # 4. Intento de subida a MinIO
   try:
     s3_client.upload_fileobj(
         file.file,
@@ -73,9 +89,10 @@ async def upload_certificate(
         detail=f"Error al subir el archivo a MinIO: {str(e)}",
     )
 
+  # 5. Intento de registro en SQL Server (con Rollback Físico en caso de fallo)
   db_certificate = CertificateModel(
-      filename=file.filename,  # Guardamos el nombre original visible
-      s3_key=unique_s3_key,  # Guardamos la clave única del objeto S3
+      filename=file.filename,
+      s3_key=unique_s3_key,
       equipment_name=equipment_name,
       client_name=client_name,
   )
@@ -86,10 +103,14 @@ async def upload_certificate(
     db.refresh(db_certificate)
   except Exception as e:
     db.rollback()
-    raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail=f"Error al guardar metadatos en SQL Server: {str(e)}",
-    )
+
+    # Rollback Físico: Borrar de MinIO el archivo subido al fallar la persistencia relacional
+    try:
+      s3_client.delete_object(
+          Bucket=settings.bucket_name, Key=unique_s3_key
+      )
+    except Exception as s3_err:
+      print(f"Error secundario en rollback de MinIO: {s3_err}")
 
   return db_certificate
 
@@ -103,7 +124,6 @@ def list_certificates(db: Session = Depends(get_db)):
 def get_certificate_download_url(
     certificate_id: int, db: Session = Depends(get_db)
 ):
-  """Genera una URL firmada temporal de MinIO para visualizar o descargar el PDF."""
   cert = (
       db.query(CertificateModel)
       .filter(CertificateModel.id == certificate_id)
@@ -116,7 +136,6 @@ def get_certificate_download_url(
     )
 
   try:
-    # URL de acceso seguro con 1 hora (3600s) de validez
     presigned_url = s3_client.generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.bucket_name, "Key": cert.s3_key},
@@ -134,10 +153,9 @@ def get_certificate_download_url(
       "download_url": presigned_url,
   }
 
+
 @app.delete("/certificates/{certificate_id}", status_code=status.HTTP_200_OK)
 def delete_certificate(certificate_id: int, db: Session = Depends(get_db)):
-  """Elimina de forma coordinada el archivo en MinIO y su registro en SQL Server."""
-  # 1. Buscar los metadatos del certificado en SQL Server
   cert = (
       db.query(CertificateModel)
       .filter(CertificateModel.id == certificate_id)
@@ -149,7 +167,6 @@ def delete_certificate(certificate_id: int, db: Session = Depends(get_db)):
         detail="El certificado solicitado no existe.",
     )
 
-  # 2. Eliminar el archivo físico almacenado en el bucket de MinIO
   try:
     s3_client.delete_object(Bucket=settings.bucket_name, Key=cert.s3_key)
   except (BotoCoreError, ClientError) as e:
@@ -158,7 +175,6 @@ def delete_certificate(certificate_id: int, db: Session = Depends(get_db)):
         detail=f"Error al eliminar el archivo físico en MinIO: {str(e)}",
     )
 
-  # 3. Eliminar el registro correspondiente en SQL Server
   try:
     db.delete(cert)
     db.commit()
