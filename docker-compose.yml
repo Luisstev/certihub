@@ -1,18 +1,38 @@
-version: '3.8'
+
 
 services:
-  s3-emulator:
-    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
-    container_name: certihub_s3
+  # Servicio de la API FastAPI
+  api:
+    build: .
+    container_name: certihub_api
     ports:
-      - "9000:9000" # Puerto para la API de S3 (boto3)
-      - "9001:9001" # Puerto para la consola web
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - minio
+    networks:
+      - certihub_net
+
+  # Servicio de Almacenamiento de Objetos (MinIO)
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: certihub_minio
+    ports:
+      - "9005:9000"   # Puerto API S3
+      - "9002:9001"   # Consola Web MinIO
     environment:
-      MINIO_ROOT_USER: "admin"
-      MINIO_ROOT_PASSWORD: "password123"
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
     command: server /data --console-address ":9001"
     volumes:
-      - s3_data:/data
+      - minio_data:/data
+    networks:
+      - certihub_net
 
 volumes:
-  s3_data:
+  minio_data:
+
+networks:
+  certihub_net:
+    driver: bridge
